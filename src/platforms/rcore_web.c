@@ -68,6 +68,14 @@
     #define _POSIX_C_SOURCE 199309L     // Required for: CLOCK_MONOTONIC if compiled with c99 without gnu ext.
 #endif
 
+// Detect emscripten versions which need CSS scale mitigation
+#if (__EMSCRIPTEN_major__ == 3 && __EMSCRIPTEN_minor__ == 1) && \
+    ( __EMSCRIPTEN_tiny__ >= 51 && __EMSCRIPTEN_tiny__ <= 71)
+    #define MITIGATE_CSS_SCALING 1
+#else
+    #define MITIGATE_CSS_SCALING 0
+#endif
+
 //----------------------------------------------------------------------------------
 // Types and Structures Definition
 //----------------------------------------------------------------------------------
@@ -1104,6 +1112,8 @@ void PollInputEvents(void)
 // Initialize platform: graphics, inputs and more
 int InitPlatform(void)
 {
+    TRACELOG(LOG_INFO, "Built Using Emscripten %i.%i.%i", __EMSCRIPTEN_major__, __EMSCRIPTEN_minor__, __EMSCRIPTEN_tiny__);
+
     glfwSetErrorCallback(ErrorCallback);
 
     // Initialize GLFW internal global state
@@ -1599,6 +1609,25 @@ static void MouseCursorPosCallback(GLFWwindow *window, double x, double y)
     // If the pointer is not locked, follow the position
     if (!CORE.Input.Mouse.cursorHidden)
     {
+        // In Emscripten 3.1.51 - 3.1.71, CSS scaling of the
+        // canvas throws the reported mouse position out of whack.
+        // this calculates the proper x/y coordinates.
+        #if(MITIGATE_CSS_SCALING)
+            x = EM_ASM_DOUBLE({
+                const rect = Module.canvas.getBoundingClientRect();
+                const scaleX = $0 / rect.width;
+                const mouseX = event.clientX - rect.left;
+                return mouseX * scaleX;
+            }, CORE.Window.screen.width);
+
+            y = EM_ASM_DOUBLE({
+                const rect = Module.canvas.getBoundingClientRect();
+                const scaleY = $0 / rect.height;
+                const mouseY = event.clientY - rect.top;
+                return mouseY * scaleY;
+            }, CORE.Window.screen.height);
+        #endif
+
         CORE.Input.Mouse.currentPosition.x = (float)x;
         CORE.Input.Mouse.currentPosition.y = (float)y;
         CORE.Input.Touch.position[0] = CORE.Input.Mouse.currentPosition;
@@ -1688,7 +1717,17 @@ static EM_BOOL EmscriptenFullscreenChangeCallback(int eventType, const Emscripte
 static EM_BOOL EmscriptenResizeCallback(int eventType, const EmscriptenUiEvent *event, void *userData)
 {
     // Don't resize non-resizeable windows
-    if ((CORE.Window.flags & FLAG_WINDOW_RESIZABLE) == 0) return 1;
+    if ((CORE.Window.flags & FLAG_WINDOW_RESIZABLE) == 0)
+    {
+        // In Emscripten 3.1.51 through 3.1.71, glfw tries to force a
+        // resize of the window to the new CSS size of the canvas.
+        // Explicitly setting the size to the configured screen size
+        // here ensures the window is the size we expect it to be.
+        #if(MITIGATE_CSS_SCALING)
+            glfwSetWindowSize(platform.handle, CORE.Window.screen.width, CORE.Window.screen.height);
+        #endif
+        return 1;
+    }
 
     // This event is called whenever the window changes sizes,
     // so the size of the canvas object is explicitly retrieved below
